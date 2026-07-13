@@ -18,7 +18,7 @@ const EXCLUDE = /testnet|sepolia|goerli|mumbai|pegasus|amoy|dev|old/i;
 
 // Public RPCs for chains with no ~/.ethereum config (or a broken one).
 const PUBLIC_FALLBACKS: Record<number, string[]> = {
-  1: ["https://eth.drpc.org"],
+  1: ["https://mainnet.gateway.tenderly.co", "https://rpc.mevblocker.io", "https://eth.drpc.org"],
   56: ["https://bsc.rpc.blxrbdn.com"],
   137: ["https://polygon.gateway.tenderly.co"],
   143: ["https://monad.drpc.org"],
