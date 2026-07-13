@@ -16,8 +16,17 @@ const OUT_FILE = join(import.meta.dirname, "../config/chains.json");
 // Names of non-mainnet deployments that don't say "testnet"
 const EXCLUDE = /testnet|sepolia|goerli|mumbai|pegasus|amoy|dev|old/i;
 
-// chainId -> Alchemy subdomain. Unsupported/wrong guesses are caught by the
-// eth_chainId verification and fall back to ~/.ethereum.
+// Public RPCs for chains with no ~/.ethereum config (or a broken one).
+const PUBLIC_FALLBACKS: Record<number, string[]> = {
+  1: ["https://eth.drpc.org"],
+  56: ["https://rpc-bsc.48.club"],
+  137: ["https://polygon.gateway.tenderly.co"],
+  143: ["https://monad.drpc.org"],
+};
+
+// chainId -> Alchemy subdomain. Last-resort only: the free tier caps
+// eth_getLogs at a 10-block range, which fails verification below — these
+// only get picked if the key is upgraded to PAYG.
 const ALCHEMY_SUBDOMAINS: Record<number, string> = {
   1: "eth-mainnet",
   56: "bnb-mainnet",
@@ -43,37 +52,78 @@ type Chain = {
   exchangeAddress: string;
   deployBlock: number;
   rpcUrl: string;
+  logRange: number; // max eth_getLogs block range this RPC serves
 };
 
-async function rpcChainId(url: string): Promise<number | null> {
+const PROBE_SPANS = [10_000, 2_000, 500, 50];
+
+async function rpc(url: string, method: string, params: unknown[]): Promise<unknown> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = (await res.json()) as { result?: unknown; error?: { message: string } };
+  if (body.error) throw new Error(body.error.message);
+  if (body.result === undefined) throw new Error("no result");
+  return body.result;
+}
+
+// Verifies chainId, then probes the largest eth_getLogs block range the RPC
+// serves (rules out Alchemy free tier's 10-block cap and other crippled
+// endpoints). Returns the usable range, or null if unusable.
+async function probe(url: string, chainId: number, address: string): Promise<number | null> {
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const body = (await res.json()) as { result?: string };
-    return body.result ? Number(body.result) : null;
+    if (Number(await rpc(url, "eth_chainId", [])) !== chainId) return null;
+    const head = Number(await rpc(url, "eth_blockNumber", []));
+    for (const span of PROBE_SPANS) {
+      try {
+        await rpc(url, "eth_getLogs", [
+          {
+            address,
+            fromBlock: "0x" + Math.max(0, head - span + 1).toString(16),
+            toBlock: "0x" + head.toString(16),
+          },
+        ]);
+        return span;
+      } catch {
+        // range too large for this RPC — try a smaller span
+      }
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
-async function pickRpc(name: string, chainId: number): Promise<string | null> {
-  const subdomain = ALCHEMY_SUBDOMAINS[chainId];
-  if (subdomain) {
-    const url = `https://${subdomain}.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
-    if ((await rpcChainId(url)) === chainId) return url;
-    console.warn(`  ${name}: alchemy ${subdomain} failed verification, trying ~/.ethereum`);
-  }
+async function pickRpc(
+  name: string,
+  chainId: number,
+  address: string
+): Promise<{ url: string; logRange: number } | null> {
+  const candidates: string[] = [];
   const configPath = join(ETHEREUM_DIR, `${name}.json`);
   if (existsSync(configPath)) {
-    const { url } = JSON.parse(readFileSync(configPath, "utf8"));
-    if ((await rpcChainId(url)) === chainId) return url;
-    console.warn(`  ${name}: ~/.ethereum RPC ${url} failed verification`);
+    candidates.push(JSON.parse(readFileSync(configPath, "utf8")).url);
   }
-  return null;
+  candidates.push(...(PUBLIC_FALLBACKS[chainId] ?? []));
+  const subdomain = ALCHEMY_SUBDOMAINS[chainId];
+  if (subdomain) {
+    candidates.push(`https://${subdomain}.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`);
+  }
+
+  let best: { url: string; logRange: number } | null = null;
+  for (const url of candidates) {
+    const logRange = await probe(url, chainId, address);
+    if (logRange === PROBE_SPANS[0]) return { url, logRange };
+    if (logRange !== null) {
+      if (!best || logRange > best.logRange) best = { url, logRange };
+      continue;
+    }
+    console.warn(`  ${name}: ${url.replace(process.env.ALCHEMY_API_KEY!, "***")} failed verification`);
+  }
+  return best;
 }
 
 async function main() {
@@ -92,8 +142,8 @@ async function main() {
 
     const chainId = Number(readFileSync(join(dir, ".chainId"), "utf8").trim());
     const { address, receipt } = JSON.parse(readFileSync(artifact, "utf8"));
-    const rpcUrl = await pickRpc(name, chainId);
-    if (!rpcUrl) {
+    const picked = await pickRpc(name, chainId, address);
+    if (!picked) {
       skipped.push(`${name} (${chainId})`);
       continue;
     }
@@ -102,9 +152,10 @@ async function main() {
       chainId,
       exchangeAddress: address,
       deployBlock: receipt?.blockNumber ?? 0,
-      rpcUrl,
+      rpcUrl: picked.url,
+      logRange: picked.logRange,
     });
-    console.log(`  ${name} (${chainId}): ok`);
+    console.log(`  ${name} (${chainId}): ok (logRange ${picked.logRange})`);
   }
 
   mkdirSync(join(import.meta.dirname, "../config"), { recursive: true });

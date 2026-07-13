@@ -7,6 +7,7 @@ export type Chain = {
   exchangeAddress: `0x${string}`;
   deployBlock: number;
   rpcUrl: string;
+  logRange: number; // max eth_getLogs block range the RPC serves
 };
 
 export function loadChains(): Chain[] {
