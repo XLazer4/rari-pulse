@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "gen:chains": "tsx scripts/gen-chains.ts",
+    "discover": "tsx scripts/discover.ts",
+    "index": "tsx scripts/index-events.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.3",
