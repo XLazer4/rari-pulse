@@ -19,7 +19,7 @@ const EXCLUDE = /testnet|sepolia|goerli|mumbai|pegasus|amoy|dev|old/i;
 // Public RPCs for chains with no ~/.ethereum config (or a broken one).
 const PUBLIC_FALLBACKS: Record<number, string[]> = {
   1: ["https://eth.drpc.org"],
-  56: ["https://rpc-bsc.48.club"],
+  56: ["https://bsc.rpc.blxrbdn.com"],
   137: ["https://polygon.gateway.tenderly.co"],
   143: ["https://monad.drpc.org"],
 };
@@ -72,18 +72,39 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<unkn
 
 // Verifies chainId, then probes the largest eth_getLogs block range the RPC
 // serves (rules out Alchemy free tier's 10-block cap and other crippled
-// endpoints). Returns the usable range, or null if unusable.
-async function probe(url: string, chainId: number, address: string): Promise<number | null> {
+// endpoints). The range is probed at a ~90-day-old block, not at head, so
+// pruned nodes that can't serve the backfill window are rejected too.
+// Returns the usable range, or null if unusable.
+async function probe(
+  url: string,
+  chainId: number,
+  address: string,
+  deployBlock: number
+): Promise<number | null> {
   try {
     if (Number(await rpc(url, "eth_chainId", [])) !== chainId) return null;
     const head = Number(await rpc(url, "eth_blockNumber", []));
+
+    // estimate the block ~90 days ago from recent block times
+    const sampleDepth = Math.min(head - 1, 10_000);
+    const [headBlock, oldSample] = (await Promise.all([
+      rpc(url, "eth_getBlockByNumber", ["0x" + head.toString(16), false]),
+      rpc(url, "eth_getBlockByNumber", ["0x" + (head - sampleDepth).toString(16), false]),
+    ])) as { timestamp: string }[];
+    const secPerBlock =
+      (Number(headBlock.timestamp) - Number(oldSample.timestamp)) / sampleDepth;
+    const backfillStart = Math.max(
+      deployBlock,
+      Math.max(0, head - Math.round((90 * 86400) / Math.max(secPerBlock, 0.01)))
+    );
+
     for (const span of PROBE_SPANS) {
       try {
         await rpc(url, "eth_getLogs", [
           {
             address,
-            fromBlock: "0x" + Math.max(0, head - span + 1).toString(16),
-            toBlock: "0x" + head.toString(16),
+            fromBlock: "0x" + backfillStart.toString(16),
+            toBlock: "0x" + Math.min(head, backfillStart + span - 1).toString(16),
           },
         ]);
         return span;
@@ -100,7 +121,8 @@ async function probe(url: string, chainId: number, address: string): Promise<num
 async function pickRpc(
   name: string,
   chainId: number,
-  address: string
+  address: string,
+  deployBlock: number
 ): Promise<{ url: string; logRange: number } | null> {
   const candidates: string[] = [];
   const configPath = join(ETHEREUM_DIR, `${name}.json`);
@@ -115,7 +137,7 @@ async function pickRpc(
 
   let best: { url: string; logRange: number } | null = null;
   for (const url of candidates) {
-    const logRange = await probe(url, chainId, address);
+    const logRange = await probe(url, chainId, address, deployBlock);
     if (logRange === PROBE_SPANS[0]) return { url, logRange };
     if (logRange !== null) {
       if (!best || logRange > best.logRange) best = { url, logRange };
@@ -142,7 +164,7 @@ async function main() {
 
     const chainId = Number(readFileSync(join(dir, ".chainId"), "utf8").trim());
     const { address, receipt } = JSON.parse(readFileSync(artifact, "utf8"));
-    const picked = await pickRpc(name, chainId, address);
+    const picked = await pickRpc(name, chainId, address, receipt?.blockNumber ?? 0);
     if (!picked) {
       skipped.push(`${name} (${chainId})`);
       continue;
