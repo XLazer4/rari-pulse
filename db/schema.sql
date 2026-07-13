@@ -28,6 +28,18 @@ create table if not exists indexer_cursors (
   updated_at timestamptz not null default now()
 );
 
+-- per-chain totals within a range + all-time last event (for dead-chain spotting)
+create or replace function chain_stats(from_ts timestamptz, to_ts timestamptz)
+returns table (chain_id bigint, matches bigint, cancels bigint, last_event timestamptz)
+language sql stable as $$
+  select chain_id,
+         count(*) filter (where event_type = 'match' and block_time >= from_ts and block_time < to_ts) as matches,
+         count(*) filter (where event_type = 'cancel' and block_time >= from_ts and block_time < to_ts) as cancels,
+         max(block_time) as last_event
+  from match_events
+  group by chain_id;
+$$;
+
 create or replace function daily_counts(from_ts timestamptz, to_ts timestamptz)
 returns table (day date, chain_id bigint, matches bigint, cancels bigint)
 language sql stable as $$
