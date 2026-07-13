@@ -82,22 +82,32 @@ async function main() {
 
   let checked = 0;
   let failed = 0;
-  for (const chain of loadChains()) {
+  const queue = loadChains().filter((chain) => {
     if (fresh.has(chain.chainId)) {
       console.log(`  ${chain.name} (${chain.chainId}): already checked (${fresh.get(chain.chainId) ? "ACTIVE" : "inactive"})`);
-      continue;
+      return false;
     }
-    const client = createPublicClient({ transport: http(chain.rpcUrl) });
-    try {
-      const active = await hasRecentMatch(client, chain);
-      await upsert(chain, active);
-      checked++;
-      console.log(`  ${chain.name} (${chain.chainId}): ${active ? "ACTIVE" : "inactive"}`);
-    } catch (e) {
-      failed++;
-      console.log(`  ${chain.name} (${chain.chainId}): ERROR ${(e as Error).message.slice(0, 80)}`);
-    }
-  }
+    return true;
+  });
+
+  const CONCURRENCY = 8;
+  await Promise.all(
+    Array.from({ length: CONCURRENCY }, async () => {
+      let chain: Chain | undefined;
+      while ((chain = queue.shift())) {
+        const client = createPublicClient({ transport: http(chain.rpcUrl) });
+        try {
+          const active = await hasRecentMatch(client, chain);
+          await upsert(chain, active);
+          checked++;
+          console.log(`  ${chain.name} (${chain.chainId}): ${active ? "ACTIVE" : "inactive"}`);
+        } catch (e) {
+          failed++;
+          console.log(`  ${chain.name} (${chain.chainId}): ERROR ${(e as Error).message.slice(0, 80)}`);
+        }
+      }
+    })
+  );
 
   console.log(`\nchecked ${checked}, skipped ${fresh.size} fresh, ${failed} errors`);
   const { data: final } = await supabase.from("chains").select("name").eq("active", true);
