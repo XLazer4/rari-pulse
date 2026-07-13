@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# rari-pulse
 
-## Getting Started
+Internal ops dashboard for Rarible protocol activity across chains. A small
+indexer reads `Match` / `Cancel` events from the `ExchangeV2` contracts over
+RPC and stores them in Supabase; a Next.js dashboard shows trade counts per
+chain with a customizable date range.
 
-First, run the development server:
+## Setup
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+1. `npm install`
+2. Create `.env.local`:
+
+   ```
+   SUPABASE_URL=https://<project-ref>.supabase.co
+   SUPABASE_SECRET_KEY=sb_secret_...
+   ALCHEMY_API_KEY=...            # optional fallback RPCs
+   # direct psql access (schema changes only)
+   SUPABASE_DB_HOST=aws-0-<region>.pooler.supabase.com
+   SUPABASE_DB_USER=postgres.<project-ref>
+   SUPABASE_DB_PASSWORD=...
+   ```
+
+3. Apply the schema (idempotent):
+
+   ```
+   set -a && source .env.local && set +a
+   PGPASSWORD="$SUPABASE_DB_PASSWORD" psql -h "$SUPABASE_DB_HOST" -U "$SUPABASE_DB_USER" -d postgres -f db/schema.sql
+   ```
+
+## Workflow
+
+```
+npm run gen:chains   # build config/chains.json from the contracts repo + RPCs
+npm run discover     # mark chains active/inactive (≥1 trade in last 30 days)
+npm run index        # backfill (90 days on first run), then incremental
+npm run dev          # dashboard at http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- `gen:chains` reads deployment artifacts from the sibling
+  `rarible-protocol-contracts` repo and RPC URLs from `~/.ethereum/<network>.json`
+  (with public/Alchemy fallbacks). Every RPC is verified live, including the max
+  `eth_getLogs` block range it serves. Chains with no working RPC are printed
+  and skipped — `config/chains.json` is gitignored because URLs may embed keys.
+- `discover` scans newest-first and stops at the first hit, capped at 300
+  `getLogs` calls per chain; chains whose RPC only serves tiny ranges may be
+  checked partially (a note is printed). Flip `chains.active` in the DB to
+  override.
+- `index` is resumable and idempotent — run it any time; a cursor per chain is
+  kept in `indexer_cursors`. `npm run index -- --chain=<chainId>` for one chain.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Ongoing indexing
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Manual `npm run index` works; for hands-off updates add a crontab entry:
 
-## Learn More
+```
+*/30 * * * * cd ~/Documents/Github/rari-pulse && npm run index >> ~/rari-pulse-index.log 2>&1
+```
 
-To learn more about Next.js, take a look at the following resources:
+The dashboard's Indexer column flags chains whose cursor hasn't moved in 24h.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Phase 2 ideas (not built)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- USD volume: decode `matchOrders` calldata for the payment asset + amount
+  (see `projects/exchange-v2/contracts/indexing.md` in the contracts repo),
+  price via CoinGecko historical API; add `usd_value` to `match_events`.
+- Unique traders: fetch `tx.from` per event (`tx_from` column).
