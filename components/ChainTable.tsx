@@ -5,7 +5,6 @@ export type ChainRow = {
   matches: number;
   cancels: number;
   lastEvent: string | null;
-  cursorBlock: number | null;
   cursorUpdatedAt: string | null;
 };
 
@@ -29,7 +28,6 @@ export default function ChainTable({ rows }: { rows: ChainRow[] }) {
             <th className="num">Trades</th>
             <th className="num">Cancels</th>
             <th>Last trade</th>
-            <th className="num">Cursor block</th>
             <th>Indexer</th>
           </tr>
         </thead>
@@ -45,7 +43,6 @@ export default function ChainTable({ rows }: { rows: ChainRow[] }) {
                 <td className="num">{r.matches.toLocaleString("en")}</td>
                 <td className="num">{r.cancels.toLocaleString("en")}</td>
                 <td className={r.lastEvent ? undefined : "dim"}>{fmt(r.lastEvent)}</td>
-                <td className="num">{r.cursorBlock?.toLocaleString("en") ?? "—"}</td>
                 <td>
                   {r.cursorUpdatedAt === null ? (
                     <span className="dim">not indexed</span>

@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 type Daily = { day: string; chain_id: number; matches: number; cancels: number };
 type Stat = { chain_id: number; matches: number; cancels: number; last_event: string | null };
 type ChainMeta = { chain_id: number; name: string; active: boolean };
-type Cursor = { chain_id: number; last_block: number; updated_at: string };
+type Cursor = { chain_id: number; updated_at: string };
 
 const MAX_SERIES = 7; // top chains get their own line, the rest fold into "Other"
 
@@ -36,7 +36,7 @@ export default async function Home({
     supabase.rpc("daily_counts", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("chain_stats", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.from("chains").select("chain_id, name, active"),
-    supabase.from("indexer_cursors").select("chain_id, last_block, updated_at"),
+    supabase.from("indexer_cursors").select("chain_id, updated_at"),
   ]);
   const err = daily.error ?? stats.error ?? chains.error ?? cursors.error;
   if (err) throw new Error(`query failed: ${err.message}`);
@@ -96,7 +96,6 @@ export default async function Home({
         matches: Number(s?.matches ?? 0),
         cancels: Number(s?.cancels ?? 0),
         lastEvent: s?.last_event ?? null,
-        cursorBlock: cur?.last_block ?? null,
         cursorUpdatedAt: cur?.updated_at ?? null,
       };
     })
