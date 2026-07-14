@@ -8,6 +8,8 @@ export type Chain = {
   deployBlock: number;
   rpcUrl: string;
   logRange: number; // max eth_getLogs block range the RPC serves
+  wrapperAddress?: `0x${string}`; // RaribleExchangeWrapper, absent if not deployed
+  wrapperDeployBlock?: number;
 };
 
 export function loadChains(): Chain[] {

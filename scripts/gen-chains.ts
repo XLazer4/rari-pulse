@@ -53,6 +53,8 @@ type Chain = {
   deployBlock: number;
   rpcUrl: string;
   logRange: number; // max eth_getLogs block range this RPC serves
+  wrapperAddress?: string; // RaribleExchangeWrapper, absent if not deployed
+  wrapperDeployBlock?: number;
 };
 
 const PROBE_SPANS = [10_000, 2_000, 500, 50];
@@ -169,14 +171,21 @@ async function main() {
       skipped.push(`${name} (${chainId})`);
       continue;
     }
-    chains.push({
+    const chain: Chain = {
       name,
       chainId,
       exchangeAddress: address,
       deployBlock: receipt?.blockNumber ?? 0,
       rpcUrl: picked.url,
       logRange: picked.logRange,
-    });
+    };
+    const wrapperPath = join(dir, "RaribleExchangeWrapper.json");
+    if (existsSync(wrapperPath)) {
+      const wrapper = JSON.parse(readFileSync(wrapperPath, "utf8"));
+      chain.wrapperAddress = wrapper.address;
+      chain.wrapperDeployBlock = wrapper.receipt?.blockNumber ?? 0;
+    }
+    chains.push(chain);
     console.log(`  ${name} (${chainId}): ok (logRange ${picked.logRange})`);
   }
 
