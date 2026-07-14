@@ -36,6 +36,9 @@ yarn-error.log*
 # generated chain config (contains keyed RPC urls)
 /config/chains.json
 
+# local agent instructions
+CLAUDE.md
+
 # vercel
 .vercel
 
