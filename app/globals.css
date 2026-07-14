@@ -187,6 +187,20 @@ td.num,
 th.num {
   text-align: right;
 }
+.toggle-inactive {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.toggle-inactive:hover {
+  color: var(--ink);
+}
+
 .stale {
   color: var(--status-critical);
 }
