@@ -1,16 +1,19 @@
 import { supabase } from "@/lib/supabase";
 import DateRange from "@/components/DateRange";
 import DailyChart from "@/components/DailyChart";
+import SourceChart from "@/components/SourceChart";
 import ChainTable, { type ChainRow } from "@/components/ChainTable";
 
 export const dynamic = "force-dynamic";
 
 type Daily = { day: string; chain_id: number; matches: number; cancels: number };
+type SourceDaily = { day: string; source: string; trades: number };
 type Stat = { chain_id: number; matches: number; cancels: number; last_event: string | null };
 type ChainMeta = { chain_id: number; name: string; active: boolean };
 type Cursor = { chain_id: number; updated_at: string };
 
 const MAX_SERIES = 7; // top chains get their own line, the rest fold into "Other"
+const SOURCE_ORDER = ["Rarible", "OpenSea", "Blur", "X2Y2", "LooksRare", "Sudoswap"];
 
 function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -32,16 +35,18 @@ export default async function Home({
   const toExclusive = new Date(new Date(to + "T00:00:00Z").getTime() + 86400_000).toISOString();
   const fromTs = from + "T00:00:00Z";
 
-  const [daily, stats, chains, cursors] = await Promise.all([
+  const [daily, sources, stats, chains, cursors] = await Promise.all([
     supabase.rpc("daily_counts", { from_ts: fromTs, to_ts: toExclusive }),
+    supabase.rpc("daily_source_counts", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("chain_stats", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.from("chains").select("chain_id, name, active"),
     supabase.from("indexer_cursors").select("chain_id, updated_at"),
   ]);
-  const err = daily.error ?? stats.error ?? chains.error ?? cursors.error;
+  const err = daily.error ?? sources.error ?? stats.error ?? chains.error ?? cursors.error;
   if (err) throw new Error(`query failed: ${err.message}`);
 
   const dailyRows = (daily.data ?? []) as Daily[];
+  const sourceRows = (sources.data ?? []) as SourceDaily[];
   const statRows = (stats.data ?? []) as Stat[];
   const chainRows = (chains.data ?? []) as ChainMeta[];
   const cursorRows = (cursors.data ?? []) as Cursor[];
@@ -72,6 +77,27 @@ export default async function Home({
       if (r.day !== day) continue;
       const key = topIds.includes(r.chain_id) ? nameById.get(r.chain_id)! : "Other";
       if (key in row) row[key] = (row[key] as number) + r.matches;
+    }
+    return row;
+  });
+
+  // sources in fixed display order (color follows source), unknowns appended
+  const sourceTotals = new Map<string, number>();
+  for (const r of sourceRows) {
+    sourceTotals.set(r.source, (sourceTotals.get(r.source) ?? 0) + Number(r.trades));
+  }
+  const sourceNames = [...sourceTotals.keys()]
+    .filter((s) => sourceTotals.get(s)! > 0)
+    .sort((a, b) => {
+      const ia = SOURCE_ORDER.indexOf(a);
+      const ib = SOURCE_ORDER.indexOf(b);
+      return (ia === -1 ? SOURCE_ORDER.length : ia) - (ib === -1 ? SOURCE_ORDER.length : ib);
+    });
+  const sourceChartData = days.map((day) => {
+    const row: Record<string, number | string> = { day };
+    for (const name of sourceNames) row[name] = 0;
+    for (const r of sourceRows) {
+      if (r.day === day && r.source in row) row[r.source] = Number(r.trades);
     }
     return row;
   });
@@ -135,6 +161,15 @@ export default async function Home({
       <div className="card">
         <h2>Trades per day</h2>
         <DailyChart data={chartData} series={hasOther ? [...seriesNames, "Other"] : seriesNames} />
+      </div>
+      <div className="card">
+        <h2>Trades by source</h2>
+        {sourceNames.length > 0 && (
+          <p className="dim">
+            {sourceNames.map((s) => `${s} ${compact(sourceTotals.get(s)!)}`).join(" · ")}
+          </p>
+        )}
+        <SourceChart data={sourceChartData} series={sourceNames} />
       </div>
       <div className="card">
         <h2>Chains</h2>
