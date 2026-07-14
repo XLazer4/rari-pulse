@@ -2,10 +2,17 @@
 // First run backfills the last 90 days; later runs resume from the stored
 // cursor. Idempotent: re-scanning a range is a no-op (upsert + ignore dupes).
 // Usage: npm run index [-- --chain=<chainId>]
-import { createPublicClient, encodeEventTopics, http, type Log, type PublicClient } from "viem";
+import {
+  createPublicClient,
+  decodeFunctionData,
+  encodeEventTopics,
+  http,
+  type Log,
+  type PublicClient,
+} from "viem";
 import { loadChains, type Chain } from "../lib/chains";
 import { findBlockByTimestamp } from "../lib/blocks";
-import { matchEvent, cancelEvent } from "../lib/abi";
+import { matchEvent, cancelEvent, executionEvent, wrapperAbi, MARKETS } from "../lib/abi";
 import { supabase } from "../lib/supabase";
 
 const BACKFILL_DAYS = 90;
@@ -14,6 +21,9 @@ const UPSERT_BATCH = 500;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const matchTopic = encodeEventTopics({ abi: [matchEvent] })[0];
+const executionTopic = encodeEventTopics({ abi: [executionEvent] })[0];
+
+type ExecutionLog = Log & { args: { result: boolean } };
 
 async function getLogsWithRetry(
   client: PublicClient,
@@ -24,8 +34,10 @@ async function getLogsWithRetry(
   for (let attempt = 1; ; attempt++) {
     try {
       return await client.getLogs({
-        address: chain.exchangeAddress,
-        events: [matchEvent, cancelEvent],
+        address: chain.wrapperAddress
+          ? [chain.exchangeAddress, chain.wrapperAddress]
+          : chain.exchangeAddress,
+        events: [matchEvent, cancelEvent, executionEvent],
         fromBlock,
         toBlock,
       });
@@ -52,6 +64,63 @@ async function blockTimes(
   }
 }
 
+// Execution events carry no market/amount data — fetch each tx and decode the
+// singlePurchase/bulkPurchase calldata. Calldata order == Execution logIndex order.
+async function wrapperRows(
+  client: PublicClient,
+  chain: Chain,
+  executionLogs: ExecutionLog[],
+  timeCache: Map<bigint, string>
+): Promise<Record<string, unknown>[]> {
+  const byTx = new Map<string, ExecutionLog[]>();
+  for (const log of executionLogs) {
+    byTx.set(log.transactionHash!, [...(byTx.get(log.transactionHash!) ?? []), log]);
+  }
+
+  const rows: Record<string, unknown>[] = [];
+  const txHashes = [...byTx.keys()];
+  for (let i = 0; i < txHashes.length; i += 5) {
+    await Promise.all(
+      txHashes.slice(i, i + 5).map(async (txHash) => {
+        const legs = byTx
+          .get(txHash)!
+          .sort((a, b) => Number(a.logIndex!) - Number(b.logIndex!));
+        let details;
+        try {
+          const tx = await client.getTransaction({ hash: txHash as `0x${string}` });
+          const decoded = decodeFunctionData({ abi: wrapperAbi, data: tx.input });
+          details = decoded.functionName === "singlePurchase" ? [decoded.args[0]] : decoded.args[0];
+        } catch (e) {
+          console.warn(
+            `  ${chain.name}: skipping wrapper tx ${txHash} — decode failed: ${(e as Error).message.slice(0, 80)}`
+          );
+          return;
+        }
+        if (details.length !== legs.length) {
+          console.warn(
+            `  ${chain.name}: skipping wrapper tx ${txHash} — ${details.length} purchases vs ${legs.length} Execution logs`
+          );
+          return;
+        }
+        legs.forEach((log, legIndex) => {
+          const d = details[legIndex];
+          rows.push({
+            chain_id: chain.chainId,
+            tx_hash: txHash,
+            leg_index: legIndex,
+            market: MARKETS[d.marketId] ?? `market_${d.marketId}`,
+            amount: d.amount.toString(),
+            success: log.args.result,
+            block_number: Number(log.blockNumber!),
+            block_time: timeCache.get(log.blockNumber!)!,
+          });
+        });
+      })
+    );
+  }
+  return rows;
+}
+
 async function indexChain(chain: Chain): Promise<void> {
   const client = createPublicClient({ transport: http(chain.rpcUrl) });
   const head = await client.getBlockNumber();
@@ -74,7 +143,9 @@ async function indexChain(chain: Chain): Promise<void> {
   const maxChunk = BigInt(chain.logRange);
   let chunk = maxChunk;
   let total = 0;
+  let wrapperTotal = 0;
   const timeCache = new Map<bigint, string>();
+  const wrapperAddr = chain.wrapperAddress?.toLowerCase();
 
   while (from <= head) {
     const to = from + chunk - 1n > head ? head : from + chunk - 1n;
@@ -91,7 +162,8 @@ async function indexChain(chain: Chain): Promise<void> {
 
     if (logs.length > 0) {
       await blockTimes(client, logs.map((l) => l.blockNumber!), timeCache);
-      const rows = logs.map((log) => ({
+      const exchangeLogs = logs.filter((l) => l.address.toLowerCase() !== wrapperAddr);
+      const rows = exchangeLogs.map((log) => ({
         chain_id: chain.chainId,
         tx_hash: log.transactionHash!,
         log_index: Number(log.logIndex!),
@@ -109,6 +181,23 @@ async function indexChain(chain: Chain): Promise<void> {
         if (error) throw new Error(`upsert failed: ${error.message}`);
       }
       total += rows.length;
+
+      const executionLogs = logs.filter(
+        (l) => l.address.toLowerCase() === wrapperAddr && l.topics[0] === executionTopic
+      ) as ExecutionLog[];
+      if (executionLogs.length > 0) {
+        const purchases = await wrapperRows(client, chain, executionLogs, timeCache);
+        for (let i = 0; i < purchases.length; i += UPSERT_BATCH) {
+          const { error } = await supabase
+            .from("wrapper_purchases")
+            .upsert(purchases.slice(i, i + UPSERT_BATCH), {
+              onConflict: "chain_id,tx_hash,leg_index",
+              ignoreDuplicates: true,
+            });
+          if (error) throw new Error(`wrapper upsert failed: ${error.message}`);
+        }
+        wrapperTotal += purchases.length;
+      }
     }
 
     const { error } = await supabase.from("indexer_cursors").upsert({
@@ -122,7 +211,9 @@ async function indexChain(chain: Chain): Promise<void> {
     if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n;
   }
 
-  console.log(`  ${chain.name}: indexed ${total} events, cursor at ${head}`);
+  console.log(
+    `  ${chain.name}: indexed ${total} events, ${wrapperTotal} wrapper legs, cursor at ${head}`
+  );
 }
 
 async function main() {
