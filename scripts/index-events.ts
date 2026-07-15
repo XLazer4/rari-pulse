@@ -35,16 +35,28 @@ async function getLogsWithRetry(
   fromBlock: bigint,
   toBlock: bigint
 ): Promise<Log[]> {
+  const events = [matchEvent, cancelEvent, executionEvent];
   for (let attempt = 1; ; attempt++) {
     try {
-      return await client.getLogs({
-        address: chain.wrapperAddress
-          ? [chain.exchangeAddress, chain.wrapperAddress]
-          : chain.exchangeAddress,
-        events: [matchEvent, cancelEvent, executionEvent],
-        fromBlock,
-        toBlock,
-      });
+      if (!chain.wrapperAddress) {
+        return await client.getLogs({ address: chain.exchangeAddress, events, fromBlock, toBlock });
+      }
+      try {
+        return await client.getLogs({
+          address: [chain.exchangeAddress, chain.wrapperAddress],
+          events,
+          fromBlock,
+          toBlock,
+        });
+      } catch {
+        // some RPCs (e.g. blockscout's eth-rpc) reject address arrays — query per address
+        const perAddress = await Promise.all(
+          [chain.exchangeAddress, chain.wrapperAddress].map((address) =>
+            client.getLogs({ address, events, fromBlock, toBlock })
+          )
+        );
+        return perAddress.flat();
+      }
     } catch (e) {
       if (attempt >= 3) throw e;
       await sleep(2000 * attempt);
