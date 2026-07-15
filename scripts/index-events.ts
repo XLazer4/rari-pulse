@@ -4,15 +4,27 @@
 // Usage: npm run index [-- --chain=<chainId> | --all]
 import {
   createPublicClient,
+  decodeAbiParameters,
   decodeFunctionData,
   encodeEventTopics,
   http,
+  toFunctionSelector,
   type Log,
   type PublicClient,
 } from "viem";
 import { loadChains, type Chain } from "../lib/chains";
 import { findBlockByTimestamp } from "../lib/blocks";
-import { matchEvent, cancelEvent, executionEvent, wrapperAbi, MARKETS } from "../lib/abi";
+import {
+  matchEvent,
+  cancelEvent,
+  executionEvent,
+  wrapperAbi,
+  exchangeAbi,
+  ETH_ASSET_CLASS,
+  ERC20_ASSET_CLASS,
+  MARKETS,
+} from "../lib/abi";
+import { fetchPrices, priceIdsForChain, usdValue } from "../lib/prices";
 import { supabase } from "../lib/supabase";
 
 const BACKFILL_DAYS = 90;
@@ -28,6 +40,16 @@ const matchTopic = encodeEventTopics({ abi: [matchEvent] })[0];
 const executionTopic = encodeEventTopics({ abi: [executionEvent] })[0];
 
 type ExecutionLog = Log & { args: { result: boolean } };
+type Payment = {
+  payment_token: string | null;
+  payment_amount: string | null;
+  usd_value: number | null;
+};
+
+const NULL_PAYMENT: Payment = { payment_token: null, payment_amount: null, usd_value: null };
+const exchangeSelectors = exchangeAbi
+  .filter((item) => item.type === "function")
+  .map((fn) => toFunctionSelector(fn).slice(2));
 
 async function getLogsWithRetry(
   client: PublicClient,
@@ -80,13 +102,108 @@ async function blockTimes(
   }
 }
 
+function extractPayment(functionName: string, args: readonly unknown[]): { token: string; amount: bigint } | null {
+  if (functionName === "matchOrders") {
+    const left = args[0] as {
+      makeAsset: { assetType: { assetClass: string; data: `0x${string}` }; value: bigint };
+      takeAsset: { assetType: { assetClass: string; data: `0x${string}` }; value: bigint };
+    };
+    for (const asset of [left.makeAsset, left.takeAsset]) {
+      const cls = asset.assetType.assetClass.toLowerCase();
+      if (cls === ETH_ASSET_CLASS) return { token: "native", amount: asset.value };
+      if (cls === ERC20_ASSET_CLASS) {
+        const [token] = decodeAbiParameters([{ type: "address" }], asset.assetType.data);
+        return { token: token.toLowerCase(), amount: asset.value };
+      }
+    }
+    return null;
+  }
+  const direct = args[0] as {
+    paymentToken: string;
+    sellOrderPaymentAmount: bigint;
+    bidPaymentAmount?: bigint;
+  };
+  const amount = functionName === "directAcceptBid" ? direct.bidPaymentAmount! : direct.sellOrderPaymentAmount;
+  const token =
+    direct.paymentToken === "0x0000000000000000000000000000000000000000"
+      ? "native"
+      : direct.paymentToken.toLowerCase();
+  return { token, amount };
+}
+
+// Match events carry no payment data — fetch each tx and decode the exchange
+// calldata. The call may be embedded in outer calldata (routers, ERC-4337
+// bundles), so scan the input for the exchange selectors and decode at the hit.
+// txs already priced by wrapperRows are skipped: their ExchangeV2 legs also
+// emit a Match, but the wrapper row carries the value (no double counting).
+async function matchPayments(
+  client: PublicClient,
+  chain: Chain,
+  matchLogs: Log[],
+  wrapperTxs: Set<string>,
+  prices: Map<string, number>
+): Promise<Map<string, Payment>> {
+  const logCount = new Map<string, number>();
+  for (const log of matchLogs) {
+    logCount.set(log.transactionHash!, (logCount.get(log.transactionHash!) ?? 0) + 1);
+  }
+
+  const payments = new Map<string, Payment>();
+  const txHashes = [...logCount.keys()].filter((h) => !wrapperTxs.has(h));
+  for (let i = 0; i < txHashes.length; i += 5) {
+    await Promise.all(
+      txHashes.slice(i, i + 5).map(async (txHash) => {
+        let input: string;
+        try {
+          input = (await client.getTransaction({ hash: txHash as `0x${string}` })).input.toLowerCase();
+        } catch (e) {
+          console.warn(
+            `  ${chain.name}: no payment for ${txHash} — tx fetch failed: ${(e as Error).message.slice(0, 80)}`
+          );
+          return;
+        }
+        const found = new Map<string, { token: string; amount: bigint }>();
+        for (const selector of exchangeSelectors) {
+          for (let idx = input.indexOf(selector, 2); idx !== -1; idx = input.indexOf(selector, idx + 8)) {
+            try {
+              const decoded = decodeFunctionData({
+                abi: exchangeAbi,
+                data: `0x${input.slice(idx)}` as `0x${string}`,
+              });
+              const payment = extractPayment(decoded.functionName, decoded.args);
+              if (payment) found.set(`${payment.token}:${payment.amount}`, payment);
+            } catch {
+              // false-positive selector hit or truncated call — ignore
+            }
+          }
+        }
+        // only the unambiguous case: one trade in the tx, one distinct payment
+        if (found.size === 1 && logCount.get(txHash) === 1) {
+          const { token, amount } = [...found.values()][0];
+          payments.set(txHash, {
+            payment_token: token,
+            payment_amount: amount.toString(),
+            usd_value: usdValue(chain.chainId, token, amount, prices),
+          });
+        } else {
+          console.warn(
+            `  ${chain.name}: no payment for ${txHash} — ${found.size} distinct payments, ${logCount.get(txHash)} Match logs`
+          );
+        }
+      })
+    );
+  }
+  return payments;
+}
+
 // Execution events carry no market/amount data — fetch each tx and decode the
 // singlePurchase/bulkPurchase calldata. Calldata order == Execution logIndex order.
 async function wrapperRows(
   client: PublicClient,
   chain: Chain,
   executionLogs: ExecutionLog[],
-  timeCache: Map<bigint, string>
+  timeCache: Map<bigint, string>,
+  prices: Map<string, number>
 ): Promise<Record<string, unknown>[]> {
   const byTx = new Map<string, ExecutionLog[]>();
   for (const log of executionLogs) {
@@ -126,6 +243,7 @@ async function wrapperRows(
             leg_index: legIndex,
             market: MARKETS[d.marketId] ?? `market_${d.marketId}`,
             amount: d.amount.toString(),
+            usd_value: usdValue(chain.chainId, "native", d.amount, prices), // wrapper purchases pay in msg.value
             success: log.args.result,
             block_number: Number(log.blockNumber!),
             block_time: timeCache.get(log.blockNumber!)!,
@@ -137,7 +255,11 @@ async function wrapperRows(
   return rows;
 }
 
-async function indexChain(chain: Chain, backfillDays = BACKFILL_DAYS): Promise<void> {
+async function indexChain(
+  chain: Chain,
+  prices: Map<string, number>,
+  backfillDays = BACKFILL_DAYS
+): Promise<void> {
   const client = createPublicClient({ transport: http(chain.rpcUrl) });
   const head = await client.getBlockNumber();
 
@@ -179,6 +301,18 @@ async function indexChain(chain: Chain, backfillDays = BACKFILL_DAYS): Promise<v
     if (logs.length > 0) {
       await blockTimes(client, logs.map((l) => l.blockNumber!), timeCache);
       const exchangeLogs = logs.filter((l) => l.address.toLowerCase() !== wrapperAddr);
+      const executionLogs = logs.filter(
+        (l) => l.address.toLowerCase() === wrapperAddr && l.topics[0] === executionTopic
+      ) as ExecutionLog[];
+      const purchases =
+        executionLogs.length > 0 ? await wrapperRows(client, chain, executionLogs, timeCache, prices) : [];
+      const payments = await matchPayments(
+        client,
+        chain,
+        exchangeLogs.filter((l) => l.topics[0] === matchTopic),
+        new Set(purchases.map((p) => p.tx_hash as string)),
+        prices
+      );
       const rows = exchangeLogs.map((log) => ({
         chain_id: chain.chainId,
         tx_hash: log.transactionHash!,
@@ -186,6 +320,9 @@ async function indexChain(chain: Chain, backfillDays = BACKFILL_DAYS): Promise<v
         block_number: Number(log.blockNumber!),
         block_time: timeCache.get(log.blockNumber!)!,
         event_type: log.topics[0] === matchTopic ? "match" : "cancel",
+        ...(log.topics[0] === matchTopic
+          ? payments.get(log.transactionHash!) ?? NULL_PAYMENT
+          : NULL_PAYMENT),
       }));
       for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
         const { error } = await supabase
@@ -198,11 +335,7 @@ async function indexChain(chain: Chain, backfillDays = BACKFILL_DAYS): Promise<v
       }
       total += rows.length;
 
-      const executionLogs = logs.filter(
-        (l) => l.address.toLowerCase() === wrapperAddr && l.topics[0] === executionTopic
-      ) as ExecutionLog[];
-      if (executionLogs.length > 0) {
-        const purchases = await wrapperRows(client, chain, executionLogs, timeCache);
+      if (purchases.length > 0) {
         for (let i = 0; i < purchases.length; i += UPSERT_BATCH) {
           const { error } = await supabase
             .from("wrapper_purchases")
@@ -257,10 +390,12 @@ async function main() {
     return;
   }
 
+  const prices = await fetchPrices(chains.flatMap((c) => priceIdsForChain(c.chainId)));
+
   let failures = 0;
   for (const chain of chains) {
     try {
-      await indexChain(chain, allMode ? 1 : BACKFILL_DAYS);
+      await indexChain(chain, prices, allMode ? 1 : BACKFILL_DAYS);
     } catch (e) {
       failures++;
       console.error(`  ${chain.name}: FAILED — ${(e as Error).message.slice(0, 120)}`);
