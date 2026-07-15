@@ -26,7 +26,7 @@ jobs:
       - run: npm ci
       # chains.json is gitignored (keyed RPC urls) — injected from a secret;
       # refresh with: gh secret set CHAINS_JSON -R rarible/rari-pulse < config/chains.json
-      - run: printf '%s' "$CHAINS_JSON" > config/chains.json
+      - run: mkdir -p config && printf '%s' "$CHAINS_JSON" > config/chains.json
         env:
           CHAINS_JSON: ${{ secrets.CHAINS_JSON }}
       # upserts a row per config chain (FK prereq for new chains), refreshes
