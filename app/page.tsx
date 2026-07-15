@@ -8,7 +8,13 @@ export const dynamic = "force-dynamic";
 
 type Daily = { day: string; chain_id: number; matches: number; cancels: number };
 type SourceDaily = { day: string; source: string; trades: number };
-type Stat = { chain_id: number; matches: number; cancels: number; last_event: string | null };
+type Stat = {
+  chain_id: number;
+  matches: number;
+  opensea: number;
+  cancels: number;
+  last_event: string | null;
+};
 type ChainMeta = { chain_id: number; name: string; active: boolean };
 type Cursor = { chain_id: number; updated_at: string };
 
@@ -103,6 +109,7 @@ export default async function Home({
   });
 
   const totalMatches = statRows.reduce((n, s) => n + Number(s.matches), 0);
+  const totalOpensea = statRows.reduce((n, s) => n + Number(s.opensea), 0);
   const totalCancels = statRows.reduce((n, s) => n + Number(s.cancels), 0);
   const activeCount = chainRows.filter((c) => c.active).length;
   const lastEvent = statRows
@@ -120,6 +127,7 @@ export default async function Home({
         chainId: c.chain_id,
         active: c.active,
         matches: Number(s?.matches ?? 0),
+        opensea: Number(s?.opensea ?? 0),
         cancels: Number(s?.cancels ?? 0),
         lastEvent: s?.last_event ?? null,
         cursorUpdatedAt: cur?.updated_at ?? null,
@@ -136,11 +144,16 @@ export default async function Home({
       <DateRange from={from} to={to} />
       <div className="tiles">
         <div className="tile">
-          <div className="label">Trades</div>
+          <div className="label">Rarible trades</div>
           <div className="value">{compact(totalMatches)}</div>
           <div className="note">
             {from} → {to}
           </div>
+        </div>
+        <div className="tile">
+          <div className="label">OpenSea trades</div>
+          <div className="value">{compact(totalOpensea)}</div>
+          <div className="note">via Rarible wrapper</div>
         </div>
         <div className="tile">
           <div className="label">Cancels</div>

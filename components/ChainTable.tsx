@@ -7,6 +7,7 @@ export type ChainRow = {
   chainId: number;
   active: boolean;
   matches: number;
+  opensea: number;
   cancels: number;
   lastEvent: string | null;
   cursorUpdatedAt: string | null;
@@ -28,6 +29,7 @@ function Row({ r, now }: { r: ChainRow; now: number }) {
       <td className="num">{r.chainId}</td>
       <td>{r.active ? <span className="ok">✓ active</span> : <span className="dim">inactive</span>}</td>
       <td className="num">{r.matches.toLocaleString("en")}</td>
+      <td className="num">{r.opensea.toLocaleString("en")}</td>
       <td className="num">{r.cancels.toLocaleString("en")}</td>
       <td className={r.lastEvent ? undefined : "dim"}>{fmt(r.lastEvent)}</td>
       <td>
@@ -57,7 +59,8 @@ export default function ChainTable({ rows }: { rows: ChainRow[] }) {
             <th>Chain</th>
             <th className="num">Chain ID</th>
             <th>Status</th>
-            <th className="num">Trades</th>
+            <th className="num">Rarible</th>
+            <th className="num">OpenSea</th>
             <th className="num">Cancels</th>
             <th>Last trade</th>
             <th>Indexer</th>
