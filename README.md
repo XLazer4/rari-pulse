@@ -50,13 +50,22 @@ npm run dev          # dashboard at http://localhost:3000
 
 ## Ongoing indexing
 
-Manual `npm run index` works; for hands-off updates add a crontab entry:
+A GitHub Actions workflow (`.github/workflows/index.yml`) runs daily at 00:00 UTC
+on `rarible/rari-pulse`: `npm run discover` then `npm run index -- --all` — every
+config chain, except that slow-RPC chains (50-block `getLogs` caps: monad,
+hyper_evm, zilliqa) are only activity-checked by discover until they turn active.
+Chains without a cursor seed from ~1 day back; each run covers everything since
+the previous one, so missed runs self-heal.
 
-```
-*/30 * * * * cd ~/Documents/Github/rari-pulse && npm run index >> ~/rari-pulse-index.log 2>&1
+Secrets on the repo: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and `CHAINS_JSON`
+(the gitignored `config/chains.json`). After regenerating the config, refresh it:
+
+```sh
+gh secret set CHAINS_JSON -R rarible/rari-pulse < config/chains.json
 ```
 
-The dashboard's Indexer column flags chains whose cursor hasn't moved in 24h.
+Manual `npm run index` still works locally. The dashboard's Indexer column flags
+chains whose cursor hasn't moved in 24h.
 
 ## Phase 2 ideas (not built)
 

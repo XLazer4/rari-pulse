@@ -1,0 +1,35 @@
+name: index
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: index
+
+jobs:
+  index:
+    # skip on the public mirror (XLazer4/rari-pulse) — secrets live here only
+    if: github.repository == 'rarible/rari-pulse'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # chains.json is gitignored (keyed RPC urls) — injected from a secret;
+      # refresh with: gh secret set CHAINS_JSON -R rarible/rari-pulse < config/chains.json
+      - run: printf '%s' "$CHAINS_JSON" > config/chains.json
+        env:
+          CHAINS_JSON: ${{ secrets.CHAINS_JSON }}
+      # upserts a row per config chain (FK prereq for new chains), refreshes
+      # active flags, and activity-checks the slow-RPC chains cheaply
+      - run: npm run discover
+      - run: npm run index -- --all
