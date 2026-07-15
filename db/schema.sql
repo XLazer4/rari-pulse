@@ -34,27 +34,31 @@ create table if not exists indexer_cursors (
 );
 
 -- per-chain totals within a range + all-time last event (for dead-chain spotting);
--- opensea = successful wrapper purchases against OpenSea-family venues
+-- opensea = successful wrapper purchases against OpenSea-family venues.
+-- volume_usd sums priced match events + ALL successful wrapper legs: a match
+-- row is only priced when its tx has no wrapper rows, so the two never overlap
 drop function if exists chain_stats(timestamptz, timestamptz);
 create function chain_stats(from_ts timestamptz, to_ts timestamptz)
-returns table (chain_id bigint, matches bigint, opensea bigint, cancels bigint, last_event timestamptz)
+returns table (chain_id bigint, matches bigint, opensea bigint, cancels bigint, volume_usd numeric, last_event timestamptz)
 language sql stable as $$
   with m as (
     select chain_id,
            count(*) filter (where event_type = 'match' and block_time >= from_ts and block_time < to_ts) as matches,
            count(*) filter (where event_type = 'cancel' and block_time >= from_ts and block_time < to_ts) as cancels,
+           sum(usd_value) filter (where event_type = 'match' and block_time >= from_ts and block_time < to_ts) as match_usd,
            max(block_time) as last_event
     from match_events
     group by chain_id
   ), w as (
-    select chain_id, count(*) as opensea
+    select chain_id,
+           count(*) filter (where market in ('WyvernExchange', 'SeaPort_1_1', 'SeaPort_1_4', 'SeaPort_1_5', 'SeaPort_1_6')) as opensea,
+           sum(usd_value) as wrapper_usd
     from wrapper_purchases
-    where success
-      and market in ('WyvernExchange', 'SeaPort_1_1', 'SeaPort_1_4', 'SeaPort_1_5', 'SeaPort_1_6')
-      and block_time >= from_ts and block_time < to_ts
+    where success and block_time >= from_ts and block_time < to_ts
     group by chain_id
   )
-  select chain_id, coalesce(m.matches, 0), coalesce(w.opensea, 0), coalesce(m.cancels, 0), m.last_event
+  select chain_id, coalesce(m.matches, 0), coalesce(w.opensea, 0), coalesce(m.cancels, 0),
+         coalesce(m.match_usd, 0) + coalesce(w.wrapper_usd, 0), m.last_event
   from m full outer join w using (chain_id);
 $$;
 
@@ -108,6 +112,24 @@ language sql stable as $$
          count(*) filter (where event_type = 'cancel') as cancels
   from match_events
   where block_time >= from_ts and block_time < to_ts
+  group by 1, 2
+  order by 1;
+$$;
+
+-- USD volume per day per chain (priced trades only; see chain_stats note on
+-- match/wrapper non-overlap)
+create or replace function daily_volume(from_ts timestamptz, to_ts timestamptz)
+returns table (day date, chain_id bigint, volume_usd numeric)
+language sql stable as $$
+  select day, chain_id, sum(usd) as volume_usd from (
+    select date_trunc('day', block_time)::date as day, chain_id, coalesce(usd_value, 0) as usd
+    from match_events
+    where event_type = 'match' and block_time >= from_ts and block_time < to_ts
+    union all
+    select date_trunc('day', block_time)::date, chain_id, coalesce(usd_value, 0)
+    from wrapper_purchases
+    where success and block_time >= from_ts and block_time < to_ts
+  ) t
   group by 1, 2
   order by 1;
 $$;
