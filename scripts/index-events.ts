@@ -1,7 +1,7 @@
 // Indexes Match/Cancel events from active chains into Supabase.
 // First run backfills the last 90 days; later runs resume from the stored
 // cursor. Idempotent: re-scanning a range is a no-op (upsert + ignore dupes).
-// Usage: npm run index [-- --chain=<chainId>]
+// Usage: npm run index [-- --chain=<chainId> | --all]
 import {
   createPublicClient,
   decodeFunctionData,
@@ -18,6 +18,10 @@ import { supabase } from "../lib/supabase";
 const BACKFILL_DAYS = 90;
 const MIN_CHUNK = 10n;
 const UPSERT_BATCH = 500;
+
+// RPCs capped at 50-block getLogs ranges — full scans are infeasible (monad alone
+// is ~4300 calls/day). Skipped in --all mode unless the chain is marked active.
+const SLOW_RPC_CHAINS = new Set([143, 999, 32769]); // monad, hyper_evm, zilliqa
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const matchTopic = encodeEventTopics({ abi: [matchEvent] })[0];
@@ -121,7 +125,7 @@ async function wrapperRows(
   return rows;
 }
 
-async function indexChain(chain: Chain): Promise<void> {
+async function indexChain(chain: Chain, backfillDays = BACKFILL_DAYS): Promise<void> {
   const client = createPublicClient({ transport: http(chain.rpcUrl) });
   const head = await client.getBlockNumber();
 
@@ -135,7 +139,7 @@ async function indexChain(chain: Chain): Promise<void> {
   if (cursor) {
     from = BigInt(cursor.last_block) + 1n;
   } else {
-    const since = Math.floor(Date.now() / 1000) - BACKFILL_DAYS * 86400;
+    const since = Math.floor(Date.now() / 1000) - backfillDays * 86400;
     from = await findBlockByTimestamp(client, since, BigInt(chain.deployBlock));
     console.log(`  ${chain.name}: backfilling from block ${from}`);
   }
@@ -218,6 +222,7 @@ async function indexChain(chain: Chain): Promise<void> {
 
 async function main() {
   const chainArg = process.argv.find((a) => a.startsWith("--chain="))?.split("=")[1];
+  const allMode = process.argv.includes("--all");
 
   const { data: activeRows, error } = await supabase
     .from("chains")
@@ -226,7 +231,14 @@ async function main() {
   if (error) throw new Error(`failed to load chains: ${error.message}`);
   const activeIds = new Set(activeRows.map((r) => r.chain_id));
 
+  // --all: every config chain (slow-RPC ones only when active); cursor-less
+  // chains seed from ~1 day back instead of the full backfill
   let chains = loadChains().filter((c) => activeIds.has(c.chainId));
+  if (allMode) {
+    chains = loadChains().filter(
+      (c) => !SLOW_RPC_CHAINS.has(c.chainId) || activeIds.has(c.chainId)
+    );
+  }
   if (chainArg) chains = loadChains().filter((c) => c.chainId === Number(chainArg));
   if (chains.length === 0) {
     console.log("no chains to index — run `npm run discover` first");
@@ -236,7 +248,7 @@ async function main() {
   let failures = 0;
   for (const chain of chains) {
     try {
-      await indexChain(chain);
+      await indexChain(chain, allMode ? 1 : BACKFILL_DAYS);
     } catch (e) {
       failures++;
       console.error(`  ${chain.name}: FAILED — ${(e as Error).message.slice(0, 120)}`);
