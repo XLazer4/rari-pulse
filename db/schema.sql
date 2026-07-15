@@ -28,16 +28,29 @@ create table if not exists indexer_cursors (
   updated_at timestamptz not null default now()
 );
 
--- per-chain totals within a range + all-time last event (for dead-chain spotting)
-create or replace function chain_stats(from_ts timestamptz, to_ts timestamptz)
-returns table (chain_id bigint, matches bigint, cancels bigint, last_event timestamptz)
+-- per-chain totals within a range + all-time last event (for dead-chain spotting);
+-- opensea = successful wrapper purchases against OpenSea-family venues
+drop function if exists chain_stats(timestamptz, timestamptz);
+create function chain_stats(from_ts timestamptz, to_ts timestamptz)
+returns table (chain_id bigint, matches bigint, opensea bigint, cancels bigint, last_event timestamptz)
 language sql stable as $$
-  select chain_id,
-         count(*) filter (where event_type = 'match' and block_time >= from_ts and block_time < to_ts) as matches,
-         count(*) filter (where event_type = 'cancel' and block_time >= from_ts and block_time < to_ts) as cancels,
-         max(block_time) as last_event
-  from match_events
-  group by chain_id;
+  with m as (
+    select chain_id,
+           count(*) filter (where event_type = 'match' and block_time >= from_ts and block_time < to_ts) as matches,
+           count(*) filter (where event_type = 'cancel' and block_time >= from_ts and block_time < to_ts) as cancels,
+           max(block_time) as last_event
+    from match_events
+    group by chain_id
+  ), w as (
+    select chain_id, count(*) as opensea
+    from wrapper_purchases
+    where success
+      and market in ('WyvernExchange', 'SeaPort_1_1', 'SeaPort_1_4', 'SeaPort_1_5', 'SeaPort_1_6')
+      and block_time >= from_ts and block_time < to_ts
+    group by chain_id
+  )
+  select chain_id, coalesce(m.matches, 0), coalesce(w.opensea, 0), coalesce(m.cancels, 0), m.last_event
+  from m full outer join w using (chain_id);
 $$;
 
 -- Purchases routed through RaribleExchangeWrapper (one row per Execution leg).
