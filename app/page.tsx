@@ -8,11 +8,13 @@ export const dynamic = "force-dynamic";
 
 type Daily = { day: string; chain_id: number; matches: number; cancels: number };
 type SourceDaily = { day: string; source: string; trades: number };
+type DailyVolume = { day: string; chain_id: number; volume_usd: number };
 type Stat = {
   chain_id: number;
   matches: number;
   opensea: number;
   cancels: number;
+  volume_usd: number;
   last_event: string | null;
 };
 type ChainMeta = { chain_id: number; name: string; active: boolean };
@@ -29,6 +31,15 @@ function compact(n: number): string {
   return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
 }
 
+function usd(n: number): string {
+  return Intl.NumberFormat("en", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(n);
+}
+
 export default async function Home({
   searchParams,
 }: {
@@ -41,18 +52,21 @@ export default async function Home({
   const toExclusive = new Date(new Date(to + "T00:00:00Z").getTime() + 86400_000).toISOString();
   const fromTs = from + "T00:00:00Z";
 
-  const [daily, sources, stats, chains, cursors] = await Promise.all([
+  const [daily, sources, volumes, stats, chains, cursors] = await Promise.all([
     supabase.rpc("daily_counts", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("daily_source_counts", { from_ts: fromTs, to_ts: toExclusive }),
+    supabase.rpc("daily_volume", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("chain_stats", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.from("chains").select("chain_id, name, active"),
     supabase.from("indexer_cursors").select("chain_id, updated_at"),
   ]);
-  const err = daily.error ?? sources.error ?? stats.error ?? chains.error ?? cursors.error;
+  const err =
+    daily.error ?? sources.error ?? volumes.error ?? stats.error ?? chains.error ?? cursors.error;
   if (err) throw new Error(`query failed: ${err.message}`);
 
   const dailyRows = (daily.data ?? []) as Daily[];
   const sourceRows = (sources.data ?? []) as SourceDaily[];
+  const volumeRows = (volumes.data ?? []) as DailyVolume[];
   const statRows = (stats.data ?? []) as Stat[];
   const chainRows = (chains.data ?? []) as ChainMeta[];
   const cursorRows = (cursors.data ?? []) as Cursor[];
@@ -87,6 +101,28 @@ export default async function Home({
     return row;
   });
 
+  // volume chart: same top-N/Other fold, ranked by USD volume in range
+  const volRanked = [...statRows].sort((a, b) => Number(b.volume_usd) - Number(a.volume_usd));
+  const volTopIds = volRanked
+    .slice(0, MAX_SERIES)
+    .filter((s) => Number(s.volume_usd) > 0)
+    .map((s) => s.chain_id);
+  const volSeriesNames = volTopIds.map((id) => nameById.get(id) ?? String(id));
+  const hasOtherVol = volumeRows.some(
+    (r) => !volTopIds.includes(r.chain_id) && Number(r.volume_usd) > 0
+  );
+  const volumeChartData = days.map((day) => {
+    const row: Record<string, number | string> = { day };
+    for (const name of volSeriesNames) row[name] = 0;
+    if (hasOtherVol) row.Other = 0;
+    for (const r of volumeRows) {
+      if (r.day !== day) continue;
+      const key = volTopIds.includes(r.chain_id) ? nameById.get(r.chain_id)! : "Other";
+      if (key in row) row[key] = Math.round(((row[key] as number) + Number(r.volume_usd)) * 100) / 100;
+    }
+    return row;
+  });
+
   // sources in fixed display order (color follows source), unknowns appended
   const sourceTotals = new Map<string, number>();
   for (const r of sourceRows) {
@@ -110,6 +146,7 @@ export default async function Home({
 
   const totalMatches = statRows.reduce((n, s) => n + Number(s.matches), 0);
   const totalOpensea = statRows.reduce((n, s) => n + Number(s.opensea), 0);
+  const totalVolume = statRows.reduce((n, s) => n + Number(s.volume_usd ?? 0), 0);
   const totalCancels = statRows.reduce((n, s) => n + Number(s.cancels), 0);
   const activeCount = chainRows.filter((c) => c.active).length;
   const lastEvent = statRows
@@ -128,6 +165,7 @@ export default async function Home({
         active: c.active,
         matches: Number(s?.matches ?? 0),
         opensea: Number(s?.opensea ?? 0),
+        volumeUsd: Number(s?.volume_usd ?? 0),
         cancels: Number(s?.cancels ?? 0),
         lastEvent: s?.last_event ?? null,
         cursorUpdatedAt: cur?.updated_at ?? null,
@@ -156,6 +194,11 @@ export default async function Home({
           <div className="note">via Rarible wrapper</div>
         </div>
         <div className="tile">
+          <div className="label">Volume (USD)</div>
+          <div className="value">{usd(totalVolume)}</div>
+          <div className="note">priced trades only</div>
+        </div>
+        <div className="tile">
           <div className="label">Cancels</div>
           <div className="value">{compact(totalCancels)}</div>
           <div className="note">same period</div>
@@ -174,6 +217,14 @@ export default async function Home({
       <div className="card">
         <h2>Trades per day</h2>
         <DailyChart data={chartData} series={hasOther ? [...seriesNames, "Other"] : seriesNames} />
+      </div>
+      <div className="card">
+        <h2>Volume per day (USD)</h2>
+        <DailyChart
+          data={volumeChartData}
+          series={hasOtherVol ? [...volSeriesNames, "Other"] : volSeriesNames}
+          yFormat="usd"
+        />
       </div>
       <div className="card">
         <h2>Trades by source</h2>

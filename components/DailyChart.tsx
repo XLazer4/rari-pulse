@@ -30,16 +30,28 @@ function shortDay(day: string): string {
   return d.toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
+function usd(v: number): string {
+  return Intl.NumberFormat("en", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(v);
+}
+
 export default function DailyChart({
   data,
   series,
+  yFormat,
 }: {
   data: Record<string, number | string>[];
   series: string[];
+  yFormat?: "usd";
 }) {
   if (series.length === 0) {
     return <p className="dim">No trades in this period.</p>;
   }
+  const yFormatter = yFormat === "usd" ? usd : (v: number) => v.toLocaleString("en");
   return (
     <ResponsiveContainer width="100%" height={320}>
       <LineChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
@@ -58,9 +70,10 @@ export default function DailyChart({
           tickLine={false}
           axisLine={false}
           width={44}
-          tickFormatter={(v: number) => v.toLocaleString("en")}
+          tickFormatter={yFormatter}
         />
         <Tooltip
+          formatter={yFormat ? (v) => yFormatter(Number(v)) : undefined}
           labelFormatter={(day) => shortDay(String(day))}
           itemSorter={(item) => -Number(item.value)}
           contentStyle={{

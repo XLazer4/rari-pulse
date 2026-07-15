@@ -8,6 +8,7 @@ export type ChainRow = {
   active: boolean;
   matches: number;
   opensea: number;
+  volumeUsd: number;
   cancels: number;
   lastEvent: string | null;
   cursorUpdatedAt: string | null;
@@ -30,6 +31,9 @@ function Row({ r, now }: { r: ChainRow; now: number }) {
       <td>{r.active ? <span className="ok">✓ active</span> : <span className="dim">inactive</span>}</td>
       <td className="num">{r.matches.toLocaleString("en")}</td>
       <td className="num">{r.opensea.toLocaleString("en")}</td>
+      <td className="num">
+        {"$" + r.volumeUsd.toLocaleString("en", { maximumFractionDigits: 0 })}
+      </td>
       <td className="num">{r.cancels.toLocaleString("en")}</td>
       <td className={r.lastEvent ? undefined : "dim"}>{fmt(r.lastEvent)}</td>
       <td>
@@ -61,6 +65,7 @@ export default function ChainTable({ rows }: { rows: ChainRow[] }) {
             <th>Status</th>
             <th className="num">Rarible</th>
             <th className="num">OpenSea</th>
+            <th className="num">Volume (USD)</th>
             <th className="num">Cancels</th>
             <th>Last trade</th>
             <th>Indexer</th>
