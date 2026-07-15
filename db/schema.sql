@@ -16,11 +16,16 @@ create table if not exists match_events (
   block_number bigint not null,
   block_time timestamptz not null,
   event_type text not null check (event_type in ('match', 'cancel')),
-  -- phase 2: usd_value numeric, tx_from text
   primary key (chain_id, tx_hash, log_index)
 );
 create index if not exists match_events_block_time_idx on match_events (block_time);
 create index if not exists match_events_chain_time_idx on match_events (chain_id, block_time);
+
+-- payment decoded from tx calldata; NULL for cancels, rows indexed before USD
+-- tracking started, and undecodable txs
+alter table match_events add column if not exists payment_token text;      -- 'native' or lowercase erc20 address
+alter table match_events add column if not exists payment_amount numeric;  -- raw base units
+alter table match_events add column if not exists usd_value numeric;
 
 create table if not exists indexer_cursors (
   chain_id bigint primary key references chains(chain_id),
@@ -69,6 +74,7 @@ create table if not exists wrapper_purchases (
   primary key (chain_id, tx_hash, leg_index)
 );
 create index if not exists wrapper_purchases_block_time_idx on wrapper_purchases (block_time);
+alter table wrapper_purchases add column if not exists usd_value numeric;  -- NULL before USD tracking / unpriced chains
 
 -- trades per day per source: all ExchangeV2 matches as 'Rarible' + successful
 -- non-ExchangeV2 wrapper legs grouped by venue
