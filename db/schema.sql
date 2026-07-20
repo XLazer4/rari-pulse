@@ -133,3 +133,26 @@ language sql stable as $$
   group by 1, 2
   order by 1;
 $$;
+
+-- USD volume per source within a range. Rarible = priced ExchangeV2 matches +
+-- ExchangeV2 wrapper legs (wrapper-tx matches are unpriced, so no overlap —
+-- see chain_stats note). OpenSea = Wyvern/Seaport wrapper legs; rest = Other.
+create or replace function source_volume(from_ts timestamptz, to_ts timestamptz)
+returns table (source text, volume_usd numeric)
+language sql stable as $$
+  select source, sum(usd) as volume_usd from (
+    select 'Rarible' as source, coalesce(usd_value, 0) as usd
+    from match_events
+    where event_type = 'match' and block_time >= from_ts and block_time < to_ts
+    union all
+    select case
+             when market = 'ExchangeV2' then 'Rarible'
+             when market in ('WyvernExchange', 'SeaPort_1_1', 'SeaPort_1_4', 'SeaPort_1_5', 'SeaPort_1_6') then 'OpenSea'
+             else 'Other'
+           end,
+           coalesce(usd_value, 0)
+    from wrapper_purchases
+    where success and block_time >= from_ts and block_time < to_ts
+  ) t
+  group by 1;
+$$;
