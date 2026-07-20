@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 type Daily = { day: string; chain_id: number; matches: number; cancels: number };
 type SourceDaily = { day: string; source: string; trades: number };
 type DailyVolume = { day: string; chain_id: number; volume_usd: number };
+type SourceVolume = { source: string; volume_usd: number };
 type Stat = {
   chain_id: number;
   matches: number;
@@ -52,21 +53,29 @@ export default async function Home({
   const toExclusive = new Date(new Date(to + "T00:00:00Z").getTime() + 86400_000).toISOString();
   const fromTs = from + "T00:00:00Z";
 
-  const [daily, sources, volumes, stats, chains, cursors] = await Promise.all([
+  const [daily, sources, volumes, sourceVolumes, stats, chains, cursors] = await Promise.all([
     supabase.rpc("daily_counts", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("daily_source_counts", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("daily_volume", { from_ts: fromTs, to_ts: toExclusive }),
+    supabase.rpc("source_volume", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.rpc("chain_stats", { from_ts: fromTs, to_ts: toExclusive }),
     supabase.from("chains").select("chain_id, name, active"),
     supabase.from("indexer_cursors").select("chain_id, updated_at"),
   ]);
   const err =
-    daily.error ?? sources.error ?? volumes.error ?? stats.error ?? chains.error ?? cursors.error;
+    daily.error ??
+    sources.error ??
+    volumes.error ??
+    sourceVolumes.error ??
+    stats.error ??
+    chains.error ??
+    cursors.error;
   if (err) throw new Error(`query failed: ${err.message}`);
 
   const dailyRows = (daily.data ?? []) as Daily[];
   const sourceRows = (sources.data ?? []) as SourceDaily[];
   const volumeRows = (volumes.data ?? []) as DailyVolume[];
+  const sourceVolumeRows = (sourceVolumes.data ?? []) as SourceVolume[];
   const statRows = (stats.data ?? []) as Stat[];
   const chainRows = (chains.data ?? []) as ChainMeta[];
   const cursorRows = (cursors.data ?? []) as Cursor[];
@@ -146,7 +155,7 @@ export default async function Home({
 
   const totalMatches = statRows.reduce((n, s) => n + Number(s.matches), 0);
   const totalOpensea = statRows.reduce((n, s) => n + Number(s.opensea), 0);
-  const totalVolume = statRows.reduce((n, s) => n + Number(s.volume_usd ?? 0), 0);
+  const volumeBySource = new Map(sourceVolumeRows.map((r) => [r.source, Number(r.volume_usd)]));
   const totalCancels = statRows.reduce((n, s) => n + Number(s.cancels), 0);
   const activeCount = chainRows.filter((c) => c.active).length;
   const lastEvent = statRows
@@ -194,9 +203,19 @@ export default async function Home({
           <div className="note">via Rarible wrapper</div>
         </div>
         <div className="tile">
-          <div className="label">Volume (USD)</div>
-          <div className="value">{usd(totalVolume)}</div>
+          <div className="label">Rarible volume</div>
+          <div className="value">{usd(volumeBySource.get("Rarible") ?? 0)}</div>
           <div className="note">priced trades only</div>
+        </div>
+        <div className="tile">
+          <div className="label">OpenSea volume</div>
+          <div className="value">{usd(volumeBySource.get("OpenSea") ?? 0)}</div>
+          <div className="note">via Rarible wrapper</div>
+        </div>
+        <div className="tile">
+          <div className="label">Other venues volume</div>
+          <div className="value">{usd(volumeBySource.get("Other") ?? 0)}</div>
+          <div className="note">LooksRare, Blur, X2Y2, Sudoswap</div>
         </div>
         <div className="tile">
           <div className="label">Cancels</div>
