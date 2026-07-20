@@ -33,7 +33,7 @@ const UPSERT_BATCH = 500;
 
 // RPCs capped at 50-block getLogs ranges — full scans are infeasible (monad alone
 // is ~4300 calls/day). Skipped in --all mode unless the chain is marked active.
-const SLOW_RPC_CHAINS = new Set([143, 999, 32769]); // monad, hyper_evm, zilliqa
+const SLOW_RPC_CHAINS = new Set([143, 32769]); // monad, zilliqa
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const matchTopic = encodeEventTopics({ abi: [matchEvent] })[0];
