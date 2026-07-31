@@ -8,6 +8,10 @@ create table if not exists chains (
   active boolean not null default false,
   checked_at timestamptz
 );
+-- RLS on with zero policies on every table below: supabase grants anon full DML
+-- on public by default, so this is what stops an anon-key holder writing. All
+-- app/indexer access uses SUPABASE_SECRET_KEY (service_role, bypassrls).
+alter table chains enable row level security;
 
 create table if not exists match_events (
   chain_id bigint not null references chains(chain_id),
@@ -18,6 +22,7 @@ create table if not exists match_events (
   event_type text not null check (event_type in ('match', 'cancel')),
   primary key (chain_id, tx_hash, log_index)
 );
+alter table match_events enable row level security;
 create index if not exists match_events_block_time_idx on match_events (block_time);
 create index if not exists match_events_chain_time_idx on match_events (chain_id, block_time);
 
@@ -32,6 +37,7 @@ create table if not exists indexer_cursors (
   last_block bigint not null,
   updated_at timestamptz not null default now()
 );
+alter table indexer_cursors enable row level security;
 
 -- per-chain totals within a range + all-time last event (for dead-chain spotting);
 -- opensea = successful wrapper purchases against OpenSea-family venues.
@@ -77,6 +83,7 @@ create table if not exists wrapper_purchases (
   block_time timestamptz not null,
   primary key (chain_id, tx_hash, leg_index)
 );
+alter table wrapper_purchases enable row level security;
 create index if not exists wrapper_purchases_block_time_idx on wrapper_purchases (block_time);
 alter table wrapper_purchases add column if not exists usd_value numeric;  -- NULL before USD tracking / unpriced chains
 
