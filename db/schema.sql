@@ -8,10 +8,15 @@ create table if not exists chains (
   active boolean not null default false,
   checked_at timestamptz
 );
--- RLS on with zero policies on every table below: supabase grants anon full DML
--- on public by default, so this is what stops an anon-key holder writing. All
--- app/indexer access uses SUPABASE_SECRET_KEY (service_role, bypassrls).
+-- RLS on for every table below, each with a select-only "anon read" policy:
+-- supabase grants anon full DML on public by default, so RLS is what stops an
+-- anon-key holder writing, and the policies then let the publishable key read.
+-- All app/indexer access uses SUPABASE_SECRET_KEY (service_role, bypassrls) and
+-- ignores both. The publishable key ships in browsers, so these policies make
+-- every row below world-readable.
 alter table chains enable row level security;
+drop policy if exists "anon read" on chains;
+create policy "anon read" on chains for select to anon using (true);
 
 create table if not exists match_events (
   chain_id bigint not null references chains(chain_id),
@@ -23,6 +28,8 @@ create table if not exists match_events (
   primary key (chain_id, tx_hash, log_index)
 );
 alter table match_events enable row level security;
+drop policy if exists "anon read" on match_events;
+create policy "anon read" on match_events for select to anon using (true);
 create index if not exists match_events_block_time_idx on match_events (block_time);
 create index if not exists match_events_chain_time_idx on match_events (chain_id, block_time);
 
@@ -38,6 +45,8 @@ create table if not exists indexer_cursors (
   updated_at timestamptz not null default now()
 );
 alter table indexer_cursors enable row level security;
+drop policy if exists "anon read" on indexer_cursors;
+create policy "anon read" on indexer_cursors for select to anon using (true);
 
 -- per-chain totals within a range + all-time last event (for dead-chain spotting);
 -- opensea = successful wrapper purchases against OpenSea-family venues.
@@ -86,6 +95,8 @@ create table if not exists wrapper_purchases (
   primary key (chain_id, tx_hash, leg_index)
 );
 alter table wrapper_purchases enable row level security;
+drop policy if exists "anon read" on wrapper_purchases;
+create policy "anon read" on wrapper_purchases for select to anon using (true);
 create index if not exists wrapper_purchases_block_time_idx on wrapper_purchases (block_time);
 alter table wrapper_purchases add column if not exists usd_value numeric;  -- NULL before USD tracking / unpriced chains
 
