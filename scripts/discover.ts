@@ -14,6 +14,10 @@ const RECHECK_HOURS = 12;
 // ranges (e.g. 50) don't take forever. If the cap is hit before covering 30
 // days, the chain is marked inactive with a "partial coverage" note.
 const MAX_CALLS = 300;
+// Wall-clock budget per chain. Public RPCs sometimes accept a connection and
+// then answer very slowly, or never; without this one bad endpoint stalls the
+// whole run past the job timeout and starves the index step that follows.
+const CHAIN_BUDGET_MS = 90_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,7 +31,8 @@ async function hasRecentMatch(client: PublicClient, chain: Chain): Promise<boole
   let to = head;
   let calls = 0;
   let failures = 0;
-  while (to >= from && calls < MAX_CALLS) {
+  const deadline = Date.now() + CHAIN_BUDGET_MS;
+  while (to >= from && calls < MAX_CALLS && Date.now() < deadline) {
     const start = to - chunk + 1n > from ? to - chunk + 1n : from;
     try {
       const logs = await client.getLogs({
@@ -52,7 +57,7 @@ async function hasRecentMatch(client: PublicClient, chain: Chain): Promise<boole
   if (to >= from) {
     const covered = Number(head - to);
     const total = Number(head - from);
-    console.log(`    (partial: covered newest ${covered}/${total} blocks before call cap)`);
+    console.log(`    (partial: covered newest ${covered}/${total} blocks before call/time cap)`);
   }
   return false;
 }
@@ -95,7 +100,9 @@ async function main() {
     Array.from({ length: CONCURRENCY }, async () => {
       let chain: Chain | undefined;
       while ((chain = queue.shift())) {
-        const client = createPublicClient({ transport: http(chain.rpcUrl) });
+        const client = createPublicClient({
+          transport: http(chain.rpcUrl, { timeout: 15_000, retryCount: 1 }),
+        });
         try {
           const active = await hasRecentMatch(client, chain);
           await upsert(chain, active);
