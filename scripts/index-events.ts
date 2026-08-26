@@ -383,6 +383,13 @@ async function main() {
     chains = loadChains().filter(
       (c) => !SLOW_RPC_CHAINS.has(c.chainId) || activeIds.has(c.chainId)
     );
+    // Active chains first — they are the only ones the dashboard shows, and a
+    // slow inactive chain must not eat the job timeout before they are reached.
+    // (bsc's public RPC needed >1h to clear a 16-day backfill, starving every
+    // chain after it alphabetically, mainnet and polygon_mainnet included.)
+    chains.sort(
+      (a, b) => Number(activeIds.has(b.chainId)) - Number(activeIds.has(a.chainId))
+    );
   }
   if (chainArg) chains = loadChains().filter((c) => c.chainId === Number(chainArg));
   if (chains.length === 0) {
