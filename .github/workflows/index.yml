@@ -30,6 +30,12 @@ jobs:
         env:
           CHAINS_JSON: ${{ secrets.CHAINS_JSON }}
       # upserts a row per config chain (FK prereq for new chains), refreshes
-      # active flags, and activity-checks the slow-RPC chains cheaply
+      # active flags, and activity-checks the slow-RPC chains cheaply. Capped,
+      # because it also health-checks ~24 chains we never index and their flaky
+      # public RPCs must not cost the index step its budget.
       - run: npm run discover
+        timeout-minutes: 15
+      # runs even if discover failed or timed out — a red discover step used to
+      # skip this one, which is why indexing stalled from 2026-08-10
       - run: npm run index -- --all
+        if: ${{ !cancelled() }}
