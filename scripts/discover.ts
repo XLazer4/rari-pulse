@@ -121,8 +121,10 @@ async function main() {
   console.log(`active chains: ${(final ?? []).map((r) => r.name).join(", ") || "none"}`);
   // Per-chain RPC errors are routine on public endpoints and must not fail the
   // run — a red discover step used to skip indexing entirely. Only a wholesale
-  // failure (every chain errored) points at something real, like a dead DB.
-  if (checked === 0 && failed > 0) process.exitCode = 1;
+  // failure points at something real: nothing checked, nothing skipped as fresh,
+  // and every chain we did attempt errored. (Chains skipped as fresh count as
+  // healthy, or a run that retries just the two flaky ones would look total.)
+  if (checked === 0 && fresh.size === 0 && failed > 0) process.exitCode = 1;
 }
 
 main();
