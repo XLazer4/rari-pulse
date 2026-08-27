@@ -17,11 +17,13 @@ const MAX_CALLS = 300;
 // Wall-clock budget per chain. Public RPCs sometimes accept a connection and
 // then answer very slowly, or never; without this one bad endpoint stalls the
 // whole run past the job timeout and starves the index step that follows.
-const CHAIN_BUDGET_MS = 90_000;
+const CHAIN_BUDGET_MS = 180_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function hasRecentMatch(client: PublicClient, chain: Chain): Promise<boolean> {
+// null = scan was cut short by the call/time cap before finding a Match, so
+// activity is unknown rather than negative.
+async function hasRecentMatch(client: PublicClient, chain: Chain): Promise<boolean | null> {
   const since = Math.floor(Date.now() / 1000) - LOOKBACK_DAYS * 86400;
   const from = await findBlockByTimestamp(client, since, BigInt(chain.deployBlock));
   const head = await client.getBlockNumber();
@@ -58,6 +60,7 @@ async function hasRecentMatch(client: PublicClient, chain: Chain): Promise<boole
     const covered = Number(head - to);
     const total = Number(head - from);
     console.log(`    (partial: covered newest ${covered}/${total} blocks before call/time cap)`);
+    return null;
   }
   return false;
 }
@@ -84,6 +87,10 @@ async function main() {
       .filter((r) => r.checked_at && new Date(r.checked_at).getTime() > cutoff)
       .map((r) => [r.chain_id, r.active])
   );
+  // a partial scan can't prove a chain is inactive — fall back to its stored
+  // flag instead of downgrading it (base/injective have real Match events, just
+  // far enough back that the scan can be cut short before reaching them)
+  const priorActive = new Map((checkedRows ?? []).map((r) => [r.chain_id, r.active]));
 
   let checked = 0;
   let failed = 0;
@@ -104,10 +111,14 @@ async function main() {
           transport: http(chain.rpcUrl, { timeout: 15_000, retryCount: 1 }),
         });
         try {
-          const active = await hasRecentMatch(client, chain);
+          const found = await hasRecentMatch(client, chain);
+          // still upsert on an inconclusive scan — the row is the FK prereq new
+          // chains need before they can be indexed
+          const active = found ?? priorActive.get(chain.chainId) ?? false;
           await upsert(chain, active);
           checked++;
-          console.log(`  ${chain.name} (${chain.chainId}): ${active ? "ACTIVE" : "inactive"}`);
+          const note = found === null ? " (partial scan — kept previous flag)" : "";
+          console.log(`  ${chain.name} (${chain.chainId}): ${active ? "ACTIVE" : "inactive"}${note}`);
         } catch (e) {
           failed++;
           console.log(`  ${chain.name} (${chain.chainId}): ERROR ${(e as Error).message.slice(0, 80)}`);
