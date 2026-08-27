@@ -17,7 +17,11 @@ const MAX_CALLS = 300;
 // Wall-clock budget per chain. Public RPCs sometimes accept a connection and
 // then answer very slowly, or never; without this one bad endpoint stalls the
 // whole run past the job timeout and starves the index step that follows.
-const CHAIN_BUDGET_MS = 180_000;
+// Sized off the slowest legitimate scan: injective's newest Match sits ~2M
+// blocks back and its RPC serves ~10.7k blocks/s, so it needs ~184s to prove
+// itself active. The scan returns as soon as it finds a Match, so this is a
+// ceiling for the pathological case, not the common cost.
+const CHAIN_BUDGET_MS = 300_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
